@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 
 # --- CONFIGURATION ---
-BASE_URL = "[https://lda.senate.gov/api/v1/filings/](https://lda.senate.gov/api/v1/filings/)"
+BASE_URL = "https://lda.senate.gov/api/v1/filings/"
 
 # Set page to wide mode for better table viewing
 st.set_page_config(page_title="Senate LDA Dashboard", layout="wide")
@@ -37,6 +37,7 @@ with st.sidebar.form("search_form"):
     client_input = st.text_input("Client Name", help="e.g. Apple, Amazon")
     
     # 2. Filing Type
+    # Common codes: Q1-Q4 (Quarterly), MM (Mid-Year), YY (Year-End), RR (Registration), RA (Registration Amendment)
     filing_type_options = ["Q1", "Q2", "Q3", "Q4", "MM", "YY", "RR", "RA"]
     filing_types = st.multiselect("Report Type", options=filing_type_options, default=[])
     
@@ -50,6 +51,7 @@ with st.sidebar.form("search_form"):
 
     # 4. Filing Date (Date Posted)
     st.subheader("Date Posted")
+    # Default to no specific range (empty list)
     date_range = st.date_input(
         "Select Date Range",
         value=[],
@@ -58,7 +60,7 @@ with st.sidebar.form("search_form"):
         help="Select a Start and End date."
     )
     
-    # 5. Page Limit
+    # 5. Page Limit (to prevent extremely long load times)
     max_pages = st.slider("Max Pages to Fetch (25 records/page)", 1, 20, 5)
 
     submitted = st.form_submit_button("🔍 Search Records")
@@ -86,6 +88,11 @@ if submitted:
         params['client_name'] = client_input.strip()
         
     if filing_types:
+        # API doesn't support list for filing_type directly in standard way, 
+        # usually requires separate calls or specific query syntax. 
+        # For this API, we will filter in Pandas if multiple are selected, 
+        # or pass one if single. To be safe, we'll fetch broader data and filter in memory
+        # unless it's a single selection.
         if len(filing_types) == 1:
             params['filing_type'] = filing_types[0]
             
@@ -115,12 +122,14 @@ if submitted:
     status_text = st.empty()
     progress_bar = st.progress(0)
 
+    # Create session for connection pooling
     session = requests.Session()
     session.headers.update(headers)
 
     try:
         with st.spinner('Fetching data from Senate API...'):
             while next_url and page_count < max_pages:
+                # Add params only to the first call (next_url has them encoded)
                 if page_count == 0:
                     response = session.get(next_url, params=params)
                 else:
@@ -137,9 +146,11 @@ if submitted:
                 next_url = data.get('next')
                 page_count += 1
                 
+                # Update progress
                 status_text.text(f"Fetched {len(all_filings)} records... (Page {page_count}/{max_pages})")
                 progress_bar.progress(page_count / max_pages)
                 
+                # Rate limit sleep
                 time.sleep(0.5)
 
     except Exception as e:
@@ -148,11 +159,15 @@ if submitted:
     progress_bar.empty()
     status_text.empty()
 
+    # 4. PROCESS & DISPLAY DATA
     if not all_filings:
         st.warning("No records found matching your criteria.")
     else:
+        # Flatten JSON
         df = pd.json_normalize(all_filings)
 
+        # -- LOGIC: AMOUNT REPORTED --
+        # Coalesce 'income' and 'expenses' into one column
         if 'income' in df.columns and 'expenses' in df.columns:
             df['Amount Reported'] = df['income'].fillna(df['expenses'])
         elif 'income' in df.columns:
@@ -162,6 +177,8 @@ if submitted:
         else:
             df['Amount Reported'] = 0
 
+        # -- LOGIC: COLUMN SELECTION --
+        # Map API columns to user-friendly names
         column_map = {
             'registrant.name': 'Registrant Name',
             'client.name': 'Client Name',
@@ -171,14 +188,19 @@ if submitted:
             'dt_posted': 'Posted'
         }
         
+        # Filter available columns
         available_cols = [c for c in column_map.keys() if c in df.columns]
         df_clean = df[available_cols].rename(columns=column_map)
 
+        # -- FILTER: MEMORY FILTERS --
+        # If user selected multiple report types, filter here (since API param is singular)
         if len(filing_types) > 1:
             df_clean = df_clean[df_clean['Report Type'].isin(filing_types)]
 
+        # Format Amount
         st.success(f"Found {len(df_clean)} records.")
         
+        # Display as interactive table
         st.dataframe(
             df_clean, 
             use_container_width=True,
@@ -194,6 +216,7 @@ if submitted:
             }
         )
         
+        # Download Button
         csv = df_clean.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download Data as CSV",
@@ -201,5 +224,3 @@ if submitted:
             file_name='lda_search_results.csv',
             mime='text/csv',
         )
-
-
